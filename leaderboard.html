@@ -160,16 +160,18 @@ var DIV='everyone';
 var LAST=null;
 function isHolder(r){ var h=((r.bot_holder||'').trim().toLowerCase()); return h==='yes'||h==='true'||h==='1'; }
 
-function viewRows(parsed, view){
-  var rows=parsed.rows.slice();
-  if(DIV==='holders') rows=rows.filter(isHolder);
-  var now=new Date();
-  if(view==='today')  return rows.filter(function(r){ return r.day===utcDay(now); });
-  if(view==='season') return rows.filter(function(r){ return r.season===utcSeason(now); });
-  /* All time: one row per wallet — their best across every season. Without this
-     a player who topped three seasons would appear three times and the all-time
-     board would rank seasons rather than people. */
-  var p=plan(parsed.cols), best={};
+/* FREE HOLDER RUNS (2026-11-25; Founder: "Free holder entry"): each Bot holder's one free ranked run a day, published by the
+   scanner as holders_<ns>.csv beside this board (one row per run, dated). They count on the Holders table ONLY — never on
+   Everyone, which stays the paid ranking — and each holder shows once per view, with their best run (paid or free). */
+var FREE=[];
+function freeRows(text, cols){
+  var p=plan(cols), adj=p.metric ? p.metric.replace(/_raw$/,'_adjusted') : null;
+  return parseCSV(text).rows.filter(function(r){ return r.score_signature && r.score_day && r.wallet; }).map(function(r){
+    r.day=r.score_day; r.season=r.score_day.slice(0,7); r.bot_holder='yes'; r.free='yes';
+    if(adj && r[adj]==null && p.metric) r[adj]=r[p.metric]; return r; });
+}
+function bestPerWallet(rows, p){
+  var best={};
   rows.forEach(function(r){
     var w=r.wallet||'', cur=best[w];
     if(!cur){ best[w]=r; return; }
@@ -177,6 +179,18 @@ function viewRows(parsed, view){
     if(a>b || (a===b && (Number(r[p.timeCol])||0)<(Number(cur[p.timeCol])||0))) best[w]=r;
   });
   return Object.keys(best).map(function(w){ return best[w]; });
+}
+function viewRows(parsed, view){
+  var rows=parsed.rows.slice();
+  if(DIV==='holders') rows=rows.filter(isHolder).concat(FREE);
+  var now=new Date(), p0=plan(parsed.cols);
+  if(view==='today')  rows=rows.filter(function(r){ return r.day===utcDay(now); });
+  if(view==='season') rows=rows.filter(function(r){ return r.season===utcSeason(now); });
+  if(view!=='all') return DIV==='holders' ? bestPerWallet(rows, p0) : rows;
+  /* All time: one row per wallet — their best across every season. Without this
+     a player who topped three seasons would appear three times and the all-time
+     board would rank seasons rather than people. */
+  return bestPerWallet(rows, p0);
 }
 
 /* The empty state is the first thing a brand-new board shows, and on a game
@@ -201,10 +215,10 @@ function render(parsed){
   if(sl) sl.innerHTML = VIEW==='today' ? ('Today &middot; '+utcDay(now)+' UTC')
                       : VIEW==='season' ? ('Season &middot; '+seasonName(utcSeason(now)))
                       : (parsed.cols.length && !dated(parsed.cols) ? 'All time, best run per player' : 'Every season, best run per player');
-  var shown = parsed.rows.length ? viewRows(parsed, VIEW) : [];
+  var shown = (parsed.rows.length || (DIV==='holders' && FREE.length && parsed.cols.length)) ? viewRows(parsed, VIEW) : [];
   if(!shown.length){
     head.innerHTML='<th class="rank">#</th><th>Player</th>';
-    var e=(DIV==='holders' && parsed.rows.length) ? EMPTY.holders : (EMPTY[VIEW]||EMPTY.all);
+    var e=(DIV==='holders' && (parsed.rows.length || FREE.length)) ? EMPTY.holders : (EMPTY[VIEW]||EMPTY.all);
     tb.innerHTML='<tr><td colspan="2" class="empty"><b>'+e[0]+'</b>'+
                  e[1].replace('{{season}}', seasonName(utcSeason(now)))+'</td></tr>';
     return;
@@ -254,7 +268,12 @@ getBoard(CSV)
     var lm=r.headers.get('Last-Modified');
     document.getElementById('updated').textContent = lm ? ('Updated '+new Date(lm).toLocaleString('en-GB')+' \u00b7 refreshes about every 15 minutes') : 'Refreshes about every 15 minutes';
     return r.text(); })
-  .then(function(t){ return namesReady.then(function(){ render(parseCSV(t)); }); })
+  .then(function(t){ var parsed=parseCSV(t);
+    return namesReady.then(function(){ render(parsed); })
+      .then(function(){ return getBoard(CSV.replace(/^leaderboard_/,'holders_')); })
+      .then(function(r){ return r.ok ? r.text() : ''; })
+      .then(function(ft){ if(!ft) return; FREE=freeRows(ft, parsed.cols); if(FREE.length) render(parsed); })
+      .catch(function(){}); })
   .catch(function(){ document.getElementById('updated').textContent='This board refreshes about every 15 minutes.';
     render({cols:[],rows:[]}); });
 
