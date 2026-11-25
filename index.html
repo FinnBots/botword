@@ -2,7 +2,7 @@
 <html lang="en-GB">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" id="fb-csp" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self' data: https://finnstergram.com; img-src 'self' data: blob: https://arweave.net https://*.arweave.net https://finnstergram.com; connect-src 'self' https://finnbots-rpc.finnstergram.com http://127.0.0.1:8899 https://cloudflareinsights.com https://finnbots-events.finnstergram.com https://finnbots.github.io; media-src 'self' data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; manifest-src 'self'">
+<meta http-equiv="Content-Security-Policy" id="fb-csp" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://static.cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self' data: https://finnstergram.com; img-src 'self' data: blob: https://arweave.net https://*.arweave.net https://finnstergram.com; connect-src 'self' https://finnbots-rpc.finnstergram.com http://127.0.0.1:8899 https://cloudflareinsights.com https://finnbots-events.finnstergram.com https://finnbots.github.io https://finnstergram.com; media-src 'self' data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-src 'none'; manifest-src 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>BOTWORD — a FinnBots game</title>
 <!--fb:share-->
@@ -1714,6 +1714,62 @@ if(!HEADLESS){
     var MEMO_TAG = 'BWRD';
     var wallet = { pubkey:null, oil:0 };
     var inited=false, busy=false, entrySig=null, pendingResult=null;
+    // ---- fb-holder-run v1 — FREE HOLDER RUN (2026-11-25; Founder 2026-11-24, verbatim: "Free holder entry") ----------------
+    // One free ranked run a day for a wallet that holds a FinnBot. It is the SAME pair of transactions as a paid run — an entry
+    // and a score post, each a memo plus an $OIL transfer to the treasury — with a transfer of 0: memo <TAG>|hentry, then the
+    // usual <TAG>|score. The 0 transfer pays nothing; it makes the scanner (which lists the treasury's transactions) see the run.
+    // The scanner is the judge: it re-checks the Bot at entry AND at score, allows one free entry per wallet per UTC day and
+    // keeps the run off the paid board (factory_registry FREE HOLDER RUNS → holders_<ns>.csv, the Holders table).
+    // This block only decides whether to SHOW the button: a Bot in the wallet (the site's published Bot list, the same check
+    // the holders page makes) and today's free run not already used on this device. Source: templates/holder-run.js,
+    // applied byte-identically by apply-holder-run.js. Children never see it: it needs a connected wallet that holds a Bot.
+    var freeRun=false;
+    var holderRun=(function(){
+      var MINTS='https://finnstergram.com/assets/bot-mints.json', mints=null, holderOf={}, busyCheck=false;
+      function today(){ return new Date().toISOString().slice(0,10); }
+      function usedKey(){ return 'fb_hrun_'+MEMO_TAG.toLowerCase(); }
+      function usedToday(){ try{ return localStorage.getItem(usedKey())===wallet.pubkey+'|'+today(); }catch(e){ return false; } }
+      function markUsed(){ try{ localStorage.setItem(usedKey(), wallet.pubkey+'|'+today()); }catch(e){} }
+      async function isHolder(owner){
+        if(owner in holderOf) return holderOf[owner];
+        try{
+          if(!mints){ var r=await fetch(MINTS); if(!r.ok) return false; var j=await r.json(); mints={}; Object.keys(j).forEach(function(k){ mints[j[k]]=1; }); }
+          var body=JSON.stringify({ jsonrpc:'2.0', id:'hrun', method:'getTokenAccountsByOwner', params:[ owner, { programId:CFG.TOKEN_PROGRAM }, { encoding:'jsonParsed' } ] });
+          var res=await fetch(CFG.RPC,{ method:'POST', headers:{'Content-Type':'application/json'}, body:body }); if(!res.ok) return false;
+          var v=(((await res.json())||{}).result||{}).value||[];
+          holderOf[owner]=v.some(function(a){ try{ var i=a.account.data.parsed.info; return Number(i.tokenAmount.decimals)===0 && Number(i.tokenAmount.amount)>=1 && !!mints[i.mint]; }catch(e){ return false; } });
+          return holderOf[owner];
+        }catch(e){ return false; }
+      }
+      async function mount(){
+        var play=$('paidPlayBtn'); if(!play || !wallet.pubkey || busyCheck || $('hrunBox')) return;
+        busyCheck=true; var ok=await isHolder(wallet.pubkey); busyCheck=false;
+        play=$('paidPlayBtn'); if(!ok || !play || $('hrunBox') || entrySig) return;
+        var used=usedToday(), box=document.createElement('div');
+        box.id='hrunBox'; box.style.marginTop='10px';
+        box.innerHTML='<button class="btn" id="hrunBtn"'+(used?' disabled':'')+'>'+(used?'Free holder run used today':'Free holder run')+'</button>'+
+          '<p style="margin:6px 0 0;font-size:13px;opacity:.85">'+(used?'Today’s free holder run is used. A new one opens at 00:00 UTC (04:00 Gulf time).':'One free ranked run a day for every FinnBot holder. It counts on the Holders table.')+'</p>';
+        play.parentNode.insertBefore(box, play.nextSibling);
+        if(!used) $('hrunBtn').addEventListener('click', start);
+      }
+      async function start(){
+        if(busy || entrySig || !wallet.pubkey) return;
+        var b=$('hrunBtn'); freeRun=true; busy=true; if(b){ b.disabled=true; b.textContent='Starting your free run…'; }
+        try{ var sig=await sendPayment(0, MEMO_TAG+'|hentry', 'entry'); if(sig===null) return; onEntryConfirmed(sig); entered(); }
+        catch(e){ freeRun=false; busy=false;
+          setStatus('Connected as <span class="addr">'+shortAddr(wallet.pubkey||'')+'</span><br/>'+((e instanceof PayError)?e.userMessage:'The free run didn’t start. Nothing was taken — tap to try again.'), 'warn');
+          if(b){ b.disabled=false; b.textContent='Free holder run'; } }
+      }
+      function entered(){ if(!freeRun) return; markUsed(); setStatus('Free holder run — good luck! Post your score after the run. It’s free.', 'ok'); }
+      function labels(){
+        if(!freeRun) return;
+        var pb=$('postBtn'); if(pb) pb.textContent='Post score (free)';
+        var ov=$('paidOverlay'); if(ov) Array.prototype.forEach.call(ov.querySelectorAll('p'), function(p){ p.innerHTML=p.innerHTML.replace(/\(1 OIL\)/g,'(free — Holders table)'); });
+        setStatus('Run over — post your score below to record it on the Holders table. It’s free.', 'ok');
+      }
+      return { mount:mount, entered:entered, labels:labels };
+    })();
+    // ---- /fb-holder-run ----------------------------------------------------------------------------------------------------
     var connectBtn, walletStatus;
 
     function $(id){ return document.getElementById(id); }
@@ -1775,7 +1831,7 @@ if(!HEADLESS){
       if(useMobile){
         var pend={ action:action, owner:wallet.pubkey, marker:'bwrd_sign' };
         if(action==='score' && pendingResult){ pend.entrySig=entrySig; pend.score=pendingResult.score; pend.words=pendingResult.words; pend.tries=pendingResult.tries; pend.timeMs=pendingResult.timeMs; }
-        savePending(pend); setStatus('Opening Phantom to approve\u2026');
+        pend.free=freeRun; savePending(pend); setStatus('Opening Phantom to approve\u2026');
         var unsigned=tx.serialize({ requireAllSignatures:false, verifySignatures:false });
         PhantomMobile.signTransaction(unsigned, window.location.origin+window.location.pathname, 'bwrd_sign'); return null;
       }
@@ -1789,7 +1845,7 @@ if(!HEADLESS){
     function buildScoreMemo(res){ return MEMO_TAG+'|score|sig='+String(entrySig).slice(0,32)+'|score='+res.score+'|words='+res.words+'|tries='+res.tries+'|time='+Math.round(res.timeMs); }
 
     // ---- flow glue (Bot Smash: single-run action game) ---------------------
-    function relabelStart(){
+    function relabelStart(){ holderRun.mount();
       var b=$('paidPlayBtn'); if(!b) return;
       b.textContent = canPlay() ? 'Play (25 OIL)' : (wallet.pubkey ? 'Need 25 OIL to play' : 'Connect wallet first');
     }
@@ -1803,7 +1859,7 @@ if(!HEADLESS){
     function onRunEnd(res){
       if(mode!=='paid' || !entrySig) return false;
       pendingResult={ score:res.score, words:res.words, tries:res.tries, timeMs:res.timeMs, won:res.won };
-      showRunOver(pendingResult); return true;
+      showRunOver(pendingResult); holderRun.labels(); return true;
     }
     function fmtTime(ms){ var s=Math.round(ms/1000); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); }
 
@@ -1818,7 +1874,7 @@ if(!HEADLESS){
       if(busy || !pendingResult) return;
       busy=true; var pb=$('postBtn'); if(pb){ pb.disabled=true; pb.textContent='Posting\u2026'; }
       var memo=buildScoreMemo(pendingResult);
-      try{ var sig=await sendPayment(CFG.POST_FEE, memo, 'score'); if(sig===null) return; showPosted(pendingResult); }
+      try{ var sig=await sendPayment(freeRun?0:CFG.POST_FEE, memo, 'score'); if(sig===null) return; showPosted(pendingResult); }
       catch(e){ setStatus('Connected as <span class="addr">'+shortAddr(wallet.pubkey||'')+'</span><br/>'+((e instanceof PayError)?e.userMessage:'Your score post didn\u2019t confirm. Nothing recorded yet \u2014 tap to retry.'), 'warn');
         if(pb){ pb.disabled=false; pb.textContent='Retry post'; } busy=false; }
     }
@@ -1830,7 +1886,7 @@ if(!HEADLESS){
 
     // Paid start card (idle state before entry) — mirrors Mr Bot's resetToPlay.
     function showPaidStart(){
-      entrySig=null; pendingResult=null; busy=false; lockModeToggle(false);
+      entrySig=null; pendingResult=null; busy=false; freeRun=false; lockModeToggle(false);
       var ov=$('paidOverlay'); ov.classList.add('show');
       ov.innerHTML='<div class="card"><h2>BOTWORD \u2014 PAID</h2><p>25 OIL entry \u00b7 one run through today\u2019s ten hidden words \u00b7 fewer guesses score more \u00b7 fun leaderboard, not verified \u2014 holders also get their own Holders table.</p>'+
         '<button class="btn" id="paidPlayBtn">Play (25 OIL)</button></div>';
@@ -1892,11 +1948,11 @@ if(!HEADLESS){
       var result=window.PhantomMobile?PhantomMobile.consumePendingRedirect(marker):null;
       if(result&&result.type==='connect'){ wallet.pubkey=result.publicKey; connectBtn.textContent='Connected';
         setStatus('Connected as <span class="addr">'+shortAddr(wallet.pubkey)+'</span><br/>Checking your $OIL balance\u2026'); checkBalance(wallet.pubkey); return; }
-      if(result&&result.type==='signTransaction'&&pending){ connectBtn.textContent='Connected'; connectBtn.disabled=true; if(pending.owner) wallet.pubkey=pending.owner; clearPending();
+      if(result&&result.type==='signTransaction'&&pending){ connectBtn.textContent='Connected'; connectBtn.disabled=true; if(pending.owner) wallet.pubkey=pending.owner; freeRun=!!pending.free; clearPending();
         try{ var connection=new solanaWeb3.Connection(CFG.RPC,'confirmed'); var rawSig=await connection.sendRawTransaction(result.txBytes,{ skipPreflight:false });
           setStatus('Payment sent \u2014 waiting for confirmation\u2026'); var ok=await confirmSignature(connection,rawSig,30000);
           if(!ok) throw new PayError('Confirmation slow. Signature: '+rawSig+'. Do not pay again \u2014 check it first.');
-          if(pending.action==='entry'){ onEntryConfirmed(rawSig); }
+          if(pending.action==='entry'){ onEntryConfirmed(rawSig); holderRun.entered(); }
           else if(pending.action==='score'){ pendingResult={ score:pending.score, words:pending.words, tries:pending.tries, timeMs:pending.timeMs }; showPosted(pendingResult); }
           if(wallet.pubkey) checkBalance(wallet.pubkey);
         }catch(e){ setStatus('Connected as <span class="addr">'+shortAddr(wallet.pubkey||'')+'</span><br/>'+((e instanceof PayError)?e.userMessage:'Something went wrong after returning from Phantom. Check your wallet activity before retrying.'), 'warn'); }
